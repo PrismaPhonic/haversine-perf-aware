@@ -3,7 +3,8 @@ use rand::{
     rngs::ThreadRng,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io::BufWriter, path::PathBuf};
+use serde_json::ser::Formatter;
+use std::{any::Any, fs::File, io::BufWriter, path::PathBuf};
 
 use clap::Parser;
 
@@ -86,12 +87,42 @@ pub fn generate_pairs() {
 
     let file = File::create(output_file).expect("Failed to create output file");
     let writer = BufWriter::new(file);
-    simd_json::to_writer(writer, &coordinate_pairs).expect("Failed to write coordinates to file");
+    let mut ser = serde_json::Serializer::with_formatter(writer, CustomLengthFloatFormatter {});
+    coordinate_pairs
+        .serialize(&mut ser)
+        .expect("Failed to write coordinates to disk");
 
     let answers = HaversineAnswers { pairs: answers_out };
     let file = File::create(answers_file).expect("Failed to create answers file");
     let writer = BufWriter::new(file);
-    simd_json::to_writer(writer, &answers).expect("Failed to write answers to file");
+    let mut ser = serde_json::Serializer::with_formatter(writer, CustomLengthFloatFormatter {});
+    answers
+        .serialize(&mut ser)
+        .expect("Failed to write answers to disk");
+}
+
+pub struct CustomLengthFloatFormatter;
+
+impl Formatter for CustomLengthFloatFormatter {
+    #[inline]
+    fn write_f64<W>(&mut self, writer: &mut W, value: f64) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if value <= -100.0 {
+            writer.write_fmt(format_args!("{:.12}", value))
+        } else if value <= -10.0 {
+            writer.write_fmt(format_args!("{:.13}", value))
+        } else if value.is_negative() {
+            writer.write_fmt(format_args!("{:.14}", value))
+        } else if value < 10.0 {
+            writer.write_fmt(format_args!("{:.15}", value))
+        } else if value < 100.0 {
+            writer.write_fmt(format_args!("{:.14}", value))
+        } else {
+            writer.write_fmt(format_args!("{:.13}", value))
+        }
+    }
 }
 
 #[inline(always)]
