@@ -6,10 +6,12 @@ use std::path::Path;
 use std::simd::simd_swizzle;
 use std::simd::{Simd, num::SimdUint};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
+
+pub const EARTH_RADIUS: f64 = 6372.8;
 
 type U8x16 = Simd<u8, 16>;
 type U32x8 = Simd<u32, 8>;
@@ -162,20 +164,6 @@ pub unsafe fn parse8_simd(s: [&[u8; 17]; 8]) -> [f64; 8] {
     val.to_array()
 }
 
-// ======================================
-// Fixed-layout JSON (raw bytes) parser
-// ======================================
-// Layout facts (all byte counts):
-// - Header "{pairs:[" = 8
-// - Trailer "]}"      = 2
-// - TOKEN_LEN (float) = 17
-// - Labels per object: "{x0:", ",y0:", ",x1:", ",y1:" = 4 each
-// - Gaps between consecutive numbers:
-//    GAP_INTRA  = 17 + 4 = 21   (inside one object; after a number there's ",y0:" etc.)
-//    GAP_INTER  = 17 + 2 + 1 + 3 = 23   (end of object "}," + next "{" + "x0:")
-// - One object footprint: 4*17 + 4*4 + '}' = 85
-// - Between objects: one comma -> total body = 86*M - 1
-
 const HEADER_LEN: usize = 8; // {pairs:[
 const TRAILER_LEN: usize = 2; // ]}
 const LABEL_X0_LEN: usize = 6; // {"x0":
@@ -298,9 +286,118 @@ pub fn parse_pairs_json_fixed_bytes(input: &[u8]) -> CoordinatePairs {
     CoordinatePairs { pairs }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Pinned, one-worker-per-physical-core parallel parser
-// ─────────────────────────────────────────────────────────────
+#[derive(Serialize)]
+pub struct HaversineAnswers {
+    pairs: Vec<f64>,
+}
+
+#[inline(always)]
+pub fn reference_haversine(x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+    let mut lat1 = y0;
+    let mut lat2 = y1;
+    let lon1 = x0;
+    let lon2 = x1;
+
+    let d_lat = (lat2 - lat1).to_radians();
+    let d_lon = (lon2 - lon1).to_radians();
+    lat1 = lat1.to_radians();
+    lat2 = lat2.to_radians();
+
+    let a = ((d_lat / 2.0).sin()).powf(2.0)
+        + (lat1.cos() * lat2.cos() * ((d_lon / 2.0).sin()).powf(2.0));
+    let c = 2.0 * (a.sqrt()).asin();
+
+    EARTH_RADIUS * c
+}
+
+#[cfg(target_feature = "avx512f")]
+pub fn haversine_from_json_coords_parallel(input: &[u8]) -> HaversineAnswers {
+    use std::sync::mpsc;
+    use std::thread;
+
+    debug_assert!(input.len() >= HEADER_LEN + TRAILER_LEN);
+    debug_assert!(&input[0..HEADER_LEN] == b"{pairs:[");
+    debug_assert!(&input[input.len() - TRAILER_LEN..] == b"]}");
+
+    let m = object_count_bytes(input);
+    debug_assert!(m > 0 && m % 2 == 0);
+    let num_batches = m / 2; // 2 objects / batch
+
+    // Discover physical cores (one CoreId per physical core on supported OSes)
+    let cores: Vec<core_affinity::CoreId> = core_affinity::get_core_ids().unwrap_or_default();
+
+    // Don’t spawn more workers than batches
+    let n_workers = cores.len().min(num_batches);
+
+    let base_start = HEADER_LEN + LABEL_X0_LEN;
+
+    // Channel to collect chunks in (start_obj, Vec<CoordinatePair>) order
+    let (tx, rx) = mpsc::channel::<(usize, Vec<f64>)>();
+
+    thread::scope(|scope| {
+        // Divide num_batches as evenly as possible across n_workers
+        let mut start_batch = 0usize;
+        for (wid, core) in cores.iter().copied().take(n_workers).enumerate() {
+            // round-robin-ish even split: last workers may get ±1
+            let rem = num_batches - start_batch;
+            let left = n_workers - wid;
+            let take = rem / left + (if rem % left != 0 { 1 } else { 0 });
+            let end_batch = start_batch + take;
+
+            let tx = tx.clone();
+            let input_ref = &input[..];
+
+            scope.spawn(move || {
+                // Pin to the physical core for this worker
+                let _ = core_affinity::set_for_current(core);
+
+                let mut out = Vec::with_capacity(take * 2); // 2 objects per batch
+                for b in start_batch..end_batch {
+                    let p0 = base_start + (2 * b) * OBJ_PLUS_COMMA;
+
+                    // Gather 8 tokens (two objects) with fixed offsets
+                    let toks: [&[u8; 17]; 8] = [
+                        byte_slice_to_array(&input_ref[p0 + OFFS[0]..p0 + OFFS[0] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[1]..p0 + OFFS[1] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[2]..p0 + OFFS[2] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[3]..p0 + OFFS[3] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[4]..p0 + OFFS[4] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[5]..p0 + OFFS[5] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[6]..p0 + OFFS[6] + TOKEN_LEN]),
+                        byte_slice_to_array(&input_ref[p0 + OFFS[7]..p0 + OFFS[7] + TOKEN_LEN]),
+                    ];
+
+                    let vals = unsafe { parse8_simd(toks) };
+
+                    let hav1 = reference_haversine(vals[0], vals[1], vals[2], vals[3]);
+                    let hav2 = reference_haversine(vals[4], vals[5], vals[6], vals[7]);
+                    out.push(hav1);
+                    out.push(hav2);
+                }
+
+                let start_obj = 2 * start_batch; // first object index produced by this worker
+                let _ = tx.send((start_obj, out));
+            });
+
+            start_batch = end_batch;
+        }
+        drop(tx);
+    });
+
+    // Collect, sort, stitch — no copying per element
+    let mut chunks = rx.into_iter().collect::<Vec<_>>();
+    chunks.sort_unstable_by_key(|(start, _)| *start);
+
+    // Pre-size and copy in-place (tightest collector)
+    let mut pairs = Vec::with_capacity(m);
+    for (_, v) in chunks {
+        // Moves elements from each worker’s Vec into `pairs` (no reallocation because of capacity)
+        pairs.extend(v);
+    }
+
+    HaversineAnswers { pairs }
+}
+
 #[cfg(target_feature = "avx512f")]
 pub fn parse_pairs_json_parallel(input: &[u8]) -> CoordinatePairs {
     use std::sync::mpsc;

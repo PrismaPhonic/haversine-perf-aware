@@ -1,0 +1,13 @@
+[workspace]
+
+members = [
+"coordinate-generator",
+"rdtsc_timer_rogflow",
+"json-coord-parser"
+]
+resolver = "3"
+
+[workspace.dependencies]
+coordinate_generator = { path = "coordinate-generator" }
+rdtsc_timer_rogflow = { path = "rdtsc_timer_rogflow" }
+json-coord-parser = { path = "json-coord-parser" }

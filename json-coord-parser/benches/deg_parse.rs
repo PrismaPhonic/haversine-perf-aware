@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use json_coord_parser::CoordinatePairs;
 
 #[cfg(target_feature = "avx512f")]
-use json_coord_parser::{parse_pairs_json_fixed_bytes, parse_pairs_json_parallel, parse8_simd};
+use json_coord_parser::{
+    haversine_from_json_coords_parallel, parse_pairs_json_fixed_bytes, parse_pairs_json_parallel,
+    parse8_simd,
+};
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -106,7 +109,6 @@ pub fn pairs_bytes() -> Vec<u8> {
 
 #[cfg(target_feature = "avx512f")]
 fn bench_simd_avx512_parallel(c: &mut Criterion) {
-    // Ensure the data is resident before timing starts.
     let pairs: Vec<u8> = pairs_bytes();
     let data = &pairs[..];
 
@@ -121,8 +123,22 @@ fn bench_simd_avx512_parallel(c: &mut Criterion) {
 }
 
 #[cfg(target_feature = "avx512f")]
+fn bench_simd_avx512_parallel_haversine(c: &mut Criterion) {
+    let pairs: Vec<u8> = pairs_bytes();
+    let data = &pairs[..];
+
+    c.bench_function("avx512_haversine_multithreaded", |b| {
+        b.iter(|| {
+            // Black-box the input so LLVM can’t constant-fold anything.
+            let input = black_box(data);
+            let out = haversine_from_json_coords_parallel(input);
+            black_box(out);
+        });
+    });
+}
+
+#[cfg(target_feature = "avx512f")]
 fn bench_simd_avx512(c: &mut Criterion) {
-    // Ensure the data is resident before timing starts.
     let pairs: Vec<u8> = pairs_bytes();
     let data = &pairs[..];
 
@@ -165,6 +181,7 @@ fn bench_simd_json(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_simd_avx512_parallel,
+    bench_simd_avx512_parallel_haversine,
     bench_simd_avx512,
     bench_simd_json
 );

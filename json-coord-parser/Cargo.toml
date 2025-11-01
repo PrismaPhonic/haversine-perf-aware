@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 core_affinity = "0.8.3"
 serde = { version = "1.0.228", features = ["derive"] }
+rdtsc_timer_rogflow.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
@@ -17,7 +18,7 @@ name = "deg_parse"
 harness = false
 
 [profile.release]
-lto = "fat"  # Use fat LTO for better cross-module optimization
+lto = "fat"
 codegen-units = 1
 opt-level = 3
 panic = "abort"
