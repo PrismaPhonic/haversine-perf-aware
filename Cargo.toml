@@ -3,7 +3,8 @@
 members = [
 "coordinate-generator",
 "rdtsc_timer_rogflow",
-"json-coord-parser"
+"json-coord-parser",
+"timer-macros"
 ]
 resolver = "3"
 
@@ -11,3 +12,4 @@ resolver = "3"
 coordinate_generator = { path = "coordinate-generator" }
 rdtsc_timer_rogflow = { path = "rdtsc_timer_rogflow" }
 json-coord-parser = { path = "json-coord-parser" }
+timer-macros = { path = "timer-macros" }

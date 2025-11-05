@@ -1,4 +1,4 @@
-#![feature(portable_simd)]
+#![feature(portable_simd, duration_millis_float)]
 
 use std::mem::{MaybeUninit, transmute};
 #[cfg(target_feature = "avx512f")]
